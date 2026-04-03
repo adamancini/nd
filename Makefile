@@ -6,7 +6,7 @@ PLUGIN_NAME     := nd
 PLUGIN_SRC      := nd-skill
 PLUGIN_DIR      := $(shell pwd)/$(PLUGIN_SRC)
 
-.PHONY: help build test vet install update install-plugin install-skill uninstall-plugin clean
+.PHONY: help build test test-e2e vet install update install-plugin install-skill uninstall-plugin clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -21,6 +21,9 @@ build: ## Build nd binary
 
 test: ## Run tests
 	go test -v ./...
+
+test-e2e: ## Run e2e tests for plugin lifecycle
+	@bash e2e/plugin_lifecycle_test.sh
 
 vet: ## Run go vet
 	go vet ./...
