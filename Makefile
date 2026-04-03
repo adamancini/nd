@@ -5,8 +5,6 @@ PREFIX := $(HOME)/go/bin
 PLUGIN_NAME     := nd
 PLUGIN_SRC      := nd-skill
 PLUGIN_DIR      := $(shell pwd)/$(PLUGIN_SRC)
-PLUGIN_CACHE    := $(HOME)/.claude/plugins/cache/$(PLUGIN_NAME)/$(PLUGIN_NAME)
-SETTINGS_FILE   := $(HOME)/.claude/settings.json
 
 .PHONY: help build test vet install install-plugin install-skill uninstall-plugin clean
 
@@ -43,16 +41,12 @@ install-plugin: ## Install Claude Code plugin to ~/.claude/plugins
 install-skill: install-plugin ## Alias for install-plugin (matches vlt convention)
 
 uninstall-plugin: ## Remove Claude Code plugin
-	@rm -rf "$(PLUGIN_CACHE)"
-	@if [ -f "$(SETTINGS_FILE)" ]; then \
-		python3 -c "\
-import json; \
-f='$(SETTINGS_FILE)'; \
-d=json.load(open(f)); \
-d.get('enabledPlugins',{}).pop('$(PLUGIN_NAME)@$(PLUGIN_NAME)',None); \
-json.dump(d,open(f,'w'),indent=4)"; \
-		echo "  plugin removed from settings.json"; \
-	fi
+	@claude plugin uninstall "$(PLUGIN_NAME)@$(PLUGIN_NAME)" 2>/dev/null \
+		&& echo "  Plugin uninstalled." \
+		|| echo "  Plugin was not installed."
+	@claude plugin marketplace remove "$(PLUGIN_NAME)" 2>/dev/null \
+		&& echo "  Marketplace removed." \
+		|| echo "  Marketplace was not registered."
 	@echo "  nd plugin uninstalled"
 
 clean: ## Remove build artifacts
