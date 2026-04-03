@@ -8,7 +8,7 @@ PLUGIN_DIR      := $(shell pwd)/$(PLUGIN_SRC)
 PLUGIN_CACHE    := $(HOME)/.claude/plugins/cache/$(PLUGIN_NAME)/$(PLUGIN_NAME)
 SETTINGS_FILE   := $(HOME)/.claude/settings.json
 
-.PHONY: help build test vet install install-plugin install-skill uninstall-plugin clean
+.PHONY: help build test vet install update install-plugin install-skill uninstall-plugin clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -30,6 +30,13 @@ vet: ## Run go vet
 install: build install-plugin ## Install nd binary and Claude Code plugin
 	mkdir -p $(PREFIX)
 	cp $(BIN) $(PREFIX)/$(BIN)
+
+update: build ## Update nd binary and Claude Code plugin
+	mkdir -p $(PREFIX)
+	cp $(BIN) $(PREFIX)/$(BIN)
+	@claude plugin marketplace update "$(PLUGIN_NAME)"
+	@claude plugin update "$(PLUGIN_NAME)@$(PLUGIN_NAME)"
+	@echo "  nd plugin updated to $(PLUGIN_VERSION) -- restart Claude Code to activate"
 
 install-plugin: ## Install Claude Code plugin to ~/.claude/plugins
 	@claude plugin marketplace add "$(PLUGIN_DIR)" 2>/dev/null \
