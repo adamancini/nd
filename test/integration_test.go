@@ -1163,6 +1163,107 @@ func TestTreeDeepNestingIntegration(t *testing.T) {
 	}
 }
 
+// TestTopoSortIntegration exercises --sort=deps with real vault files.
+// Creates A blocks B, B blocks C; ListIssues(Sort: "deps") -> verify A,B,C order.
+func TestTopoSortIntegration(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Init(dir, "TOP", "topo-tester")
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	a, err := s.CreateIssue("Foundation", "Must be done first", "task", 2, "", nil, "")
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	b, err := s.CreateIssue("Middle layer", "Depends on A", "task", 2, "", nil, "")
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	c, err := s.CreateIssue("Top layer", "Depends on B", "task", 2, "", nil, "")
+	if err != nil {
+		t.Fatalf("create C: %v", err)
+	}
+
+	// Wire: A blocks B, B blocks C.
+	if err := s.AddDependency(b.ID, a.ID); err != nil {
+		t.Fatalf("add dep B->A: %v", err)
+	}
+	if err := s.AddDependency(c.ID, b.ID); err != nil {
+		t.Fatalf("add dep C->B: %v", err)
+	}
+
+	// List with --sort=deps.
+	issues, err := s.ListIssues(store.FilterOptions{Sort: "deps"})
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+	if len(issues) != 3 {
+		t.Fatalf("expected 3 issues, got %d", len(issues))
+	}
+
+	ids := idsOf(issues)
+	if ids[0] != a.ID {
+		t.Errorf("expected A first, got %v", ids)
+	}
+	if ids[1] != b.ID {
+		t.Errorf("expected B second, got %v", ids)
+	}
+	if ids[2] != c.ID {
+		t.Errorf("expected C third, got %v", ids)
+	}
+}
+
+// TestTopoSortIntegrationReverse exercises --sort=deps --reverse with real vault.
+func TestTopoSortIntegrationReverse(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Init(dir, "TPR", "topo-reverse-tester")
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	a, err := s.CreateIssue("Foundation", "Must be done first", "task", 2, "", nil, "")
+	if err != nil {
+		t.Fatalf("create A: %v", err)
+	}
+	b, err := s.CreateIssue("Middle layer", "Depends on A", "task", 2, "", nil, "")
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	c, err := s.CreateIssue("Top layer", "Depends on B", "task", 2, "", nil, "")
+	if err != nil {
+		t.Fatalf("create C: %v", err)
+	}
+
+	// Wire: A blocks B, B blocks C.
+	if err := s.AddDependency(b.ID, a.ID); err != nil {
+		t.Fatalf("add dep B->A: %v", err)
+	}
+	if err := s.AddDependency(c.ID, b.ID); err != nil {
+		t.Fatalf("add dep C->B: %v", err)
+	}
+
+	// List with --sort=deps --reverse.
+	issues, err := s.ListIssues(store.FilterOptions{Sort: "deps", Reverse: true})
+	if err != nil {
+		t.Fatalf("ListIssues: %v", err)
+	}
+	if len(issues) != 3 {
+		t.Fatalf("expected 3 issues, got %d", len(issues))
+	}
+
+	ids := idsOf(issues)
+	if ids[0] != c.ID {
+		t.Errorf("expected C first (reversed), got %v", ids)
+	}
+	if ids[1] != b.ID {
+		t.Errorf("expected B second (reversed), got %v", ids)
+	}
+	if ids[2] != a.ID {
+		t.Errorf("expected A third (reversed), got %v", ids)
+	}
+}
+
 func idsOf(issues []*model.Issue) []string {
 	ids := make([]string, len(issues))
 	for i, issue := range issues {

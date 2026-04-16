@@ -22,7 +22,7 @@ func addFilterFlags(cmd *cobra.Command) {
 	cmd.Flags().String("created-before", "", "filter by created date (YYYY-MM-DD)")
 	cmd.Flags().String("updated-after", "", "filter by updated date (YYYY-MM-DD)")
 	cmd.Flags().String("updated-before", "", "filter by updated date (YYYY-MM-DD)")
-	cmd.Flags().String("sort", "priority", "sort by: priority, created, updated, id")
+	cmd.Flags().String("sort", "priority", "sort by: priority, created, updated, id, deps")
 	cmd.Flags().BoolP("reverse", "r", false, "reverse sort order")
 	cmd.Flags().IntP("limit", "n", 0, "max results (0 for unlimited)")
 	cmd.Flags().String("group-by", "", "group output (valid: parent)")
