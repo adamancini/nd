@@ -22,7 +22,7 @@ type FilterOptions struct {
 	CreatedBefore time.Time
 	UpdatedAfter  time.Time
 	UpdatedBefore time.Time
-	Sort          string // "priority", "created", "updated", "id" (default)
+	Sort          string // "priority", "created", "updated", "id" (default), "deps"
 	Reverse       bool
 	Limit         int
 }
@@ -149,8 +149,20 @@ func (s *Store) MatchesFilter(issue *model.Issue, opts FilterOptions) bool {
 }
 
 // SortIssues sorts issues by the given field. Supported values: priority,
-// created, updated, id (default). If reverse is true, the order is inverted.
+// created, updated, id, deps (default: id). If reverse is true, the order is
+// inverted. The "deps" mode performs a topological sort by dependency edges
+// (blockers before blocked) with priority as the tiebreaker within each level.
 func SortIssues(issues []*model.Issue, sortBy string, reverse bool) {
+	if sortBy == "deps" {
+		sorted := TopoSortIssues(issues)
+		copy(issues, sorted)
+		if reverse {
+			for i, j := 0, len(issues)-1; i < j; i, j = i+1, j-1 {
+				issues[i], issues[j] = issues[j], issues[i]
+			}
+		}
+		return
+	}
 	less := func(a, b *model.Issue) bool { return a.ID < b.ID }
 	switch sortBy {
 	case "priority":
