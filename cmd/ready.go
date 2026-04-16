@@ -1,12 +1,16 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/RamXX/nd/internal/format"
 	"github.com/RamXX/nd/internal/graph"
 	"github.com/RamXX/nd/internal/model"
 	"github.com/RamXX/nd/internal/store"
+	"github.com/RamXX/nd/internal/watch"
 	"github.com/spf13/cobra"
 )
 
@@ -18,6 +22,10 @@ var readyCmd = &cobra.Command{
 Supports the same filter flags as 'nd list' for scoping results
 (e.g., --parent to scope to an epic, --label, --priority, etc.).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if watchMode && watchInterval <= 0 {
+			return fmt.Errorf("--interval must be greater than 0")
+		}
+
 		// Always filter out closed issues -- Ready() handles closed/deferred
 		// exclusion, but pre-filtering avoids loading unnecessary data.
 		opts, err := buildFilterOptions(cmd, "!closed")
@@ -34,36 +42,43 @@ Supports the same filter flags as 'nd list' for scoping results
 		opts.Reverse = false
 		opts.Limit = 0
 
-		s, err := store.Open(resolveVaultDir())
-		if err != nil {
-			return err
+		run := func() error {
+			s, err := store.Open(resolveVaultDir())
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+
+			// Load all issues in the vault (unfiltered) for accurate graph
+			// computation -- blockers may live outside the filtered set.
+			all, err := s.ListIssues(store.FilterOptions{})
+			if err != nil {
+				return err
+			}
+
+			g := graph.Build(all)
+			ready := g.Ready()
+
+			// Now apply the user's filters to the ready set.
+			ready = filterIssues(s, ready, opts)
+
+			store.SortIssues(ready, sortBy, reverse)
+
+			if limit > 0 && len(ready) > limit {
+				ready = ready[:limit]
+			}
+
+			if jsonOut {
+				return format.JSON(os.Stdout, ready)
+			}
+			format.Table(os.Stdout, ready)
+			return nil
 		}
-		defer s.Close()
-
-		// Load all issues in the vault (unfiltered) for accurate graph
-		// computation -- blockers may live outside the filtered set.
-		all, err := s.ListIssues(store.FilterOptions{})
-		if err != nil {
-			return err
+		if watchMode {
+			return watch.Run(time.Duration(watchInterval)*time.Second,
+				strings.Join(os.Args[1:], " "), run)
 		}
-
-		g := graph.Build(all)
-		ready := g.Ready()
-
-		// Now apply the user's filters to the ready set.
-		ready = filterIssues(s, ready, opts)
-
-		store.SortIssues(ready, sortBy, reverse)
-
-		if limit > 0 && len(ready) > limit {
-			ready = ready[:limit]
-		}
-
-		if jsonOut {
-			return format.JSON(os.Stdout, ready)
-		}
-		format.Table(os.Stdout, ready)
-		return nil
+		return run()
 	},
 }
 
@@ -81,5 +96,6 @@ func filterIssues(s *store.Store, issues []*model.Issue, opts store.FilterOption
 
 func init() {
 	addFilterFlags(readyCmd)
+	addWatchFlags(readyCmd)
 	rootCmd.AddCommand(readyCmd)
 }
