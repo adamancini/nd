@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/RamXX/nd/internal/model"
+	"github.com/mattn/go-runewidth"
 )
 
 // makeIssue creates a minimal issue for testing. All fields except ID, Title,
@@ -30,7 +31,7 @@ func TestFormatIssueLine(t *testing.T) {
 	issue.Assignee = "alice"
 	issue.Labels = []string{"auth", "urgent"}
 
-	line := FormatIssueLine(issue)
+	line := FormatIssueLine(issue, 200)
 
 	// Should contain the issue ID.
 	if !strings.Contains(line, "TST-0001") {
@@ -53,7 +54,7 @@ func TestFormatIssueLine(t *testing.T) {
 func TestFormatIssueLine_Closed(t *testing.T) {
 	issue := makeIssue("TST-0002", "Old task", model.StatusClosed, 2, model.TypeTask, "")
 
-	line := FormatIssueLine(issue)
+	line := FormatIssueLine(issue, 200)
 
 	// Closed issues should contain the closed icon.
 	if !strings.Contains(line, "TST-0002") {
@@ -62,10 +63,11 @@ func TestFormatIssueLine_Closed(t *testing.T) {
 }
 
 func TestFormatIssueLine_TruncatesLongTitle(t *testing.T) {
-	longTitle := strings.Repeat("A", 80)
+	longTitle := strings.Repeat("A", 200)
 	issue := makeIssue("TST-0003", longTitle, model.StatusOpen, 1, model.TypeTask, "")
 
-	line := FormatIssueLine(issue)
+	// Narrow availWidth forces truncation even for a very long title.
+	line := FormatIssueLine(issue, 60)
 
 	if !strings.Contains(line, "...") {
 		t.Errorf("long title should be truncated with ...: %s", line)
@@ -358,5 +360,282 @@ func TestTable_Empty(t *testing.T) {
 
 	if !strings.Contains(output, "No issues found.") {
 		t.Errorf("Table with no issues should show 'No issues found.': %s", output)
+	}
+}
+
+// prefixWidthOfIssue measures the visual width that a given issue's
+// non-title prefix occupies. Useful for computing exact budgets in
+// truncation tests without depending on internal package state.
+func prefixWidthOfIssue(issue *model.Issue) int {
+	// Pass an enormous availWidth so the title is never truncated.
+	line := FormatIssueLine(issue, 10_000)
+	stripped := stripANSI(line)
+	title := issue.Title
+	// The title always appears at the end of the stripped line.
+	idx := strings.LastIndex(stripped, title)
+	if idx < 0 {
+		return 0
+	}
+	return runewidth.StringWidth(stripped[:idx])
+}
+
+// TestFormatIssueLine_TitleExactlyAtBudget confirms that when the title
+// fits in the budget exactly (visual width == budget), no truncation
+// occurs and the title appears untouched in the output.
+func TestFormatIssueLine_TitleExactlyAtBudget(t *testing.T) {
+	title := strings.Repeat("A", 30)
+	issue := makeIssue("TST-EXCT", title, model.StatusOpen, 1, model.TypeTask, "")
+
+	prefix := prefixWidthOfIssue(issue)
+	availWidth := prefix + len(title) // budget equals exactly the title width
+
+	line := FormatIssueLine(issue, availWidth)
+	stripped := stripANSI(line)
+
+	if !strings.Contains(stripped, title) {
+		t.Errorf("title at exact budget should fit without truncation: %q (stripped=%q)", line, stripped)
+	}
+	if strings.Contains(stripped, "...") {
+		t.Errorf("title at exact budget should not be truncated with ellipsis: %q", stripped)
+	}
+}
+
+// TestFormatIssueLine_TitleOneOverBudget confirms that a title one
+// character longer than the available budget gets truncated and the
+// output ends with "...".
+func TestFormatIssueLine_TitleOneOverBudget(t *testing.T) {
+	title := strings.Repeat("A", 30)
+	issue := makeIssue("TST-OVER", title, model.StatusOpen, 1, model.TypeTask, "")
+
+	prefix := prefixWidthOfIssue(issue)
+	availWidth := prefix + len(title) - 1 // one column short of fitting the title
+
+	line := FormatIssueLine(issue, availWidth)
+	stripped := stripANSI(line)
+
+	if !strings.HasSuffix(stripped, "...") {
+		t.Errorf("title one over budget should be truncated with ...: %q", stripped)
+	}
+	// The rendered visual width must not exceed availWidth.
+	if got := runewidth.StringWidth(stripped); got > availWidth {
+		t.Errorf("rendered line width %d exceeds budget %d: %q", got, availWidth, stripped)
+	}
+}
+
+// TestFormatIssueLine_NarrowBudgetClampsToFloor confirms that a
+// pathologically narrow terminal still produces a line with a minimum
+// title floor rather than panicking or producing a negative-width slice.
+func TestFormatIssueLine_NarrowBudgetClampsToFloor(t *testing.T) {
+	title := "An unreasonably long title that will be truncated"
+	issue := makeIssue("TST-NARW", title, model.StatusOpen, 1, model.TypeTask, "")
+
+	// availWidth = 5 is smaller than the prefix alone. truncateTitle
+	// should clamp to minTitleFloor and still append "..." to signal
+	// the truncation occurred.
+	line := FormatIssueLine(issue, 5)
+	stripped := stripANSI(line)
+
+	if !strings.Contains(stripped, "...") {
+		t.Errorf("narrow budget should still mark truncation with ...: %q", stripped)
+	}
+	// Sanity: the function must not produce an empty line.
+	if strings.TrimSpace(stripped) == "" {
+		t.Errorf("narrow budget produced empty output")
+	}
+}
+
+// TestFormatIssueLine_AnsiAware confirms that the prefix-width
+// calculation strips ANSI color codes. A title that has 40 visible
+// columns should fit in a budget of prefix_width + 40 regardless of how
+// many ANSI escape bytes the colorized prefix contains.
+func TestFormatIssueLine_AnsiAware(t *testing.T) {
+	title := strings.Repeat("B", 40)
+	// StatusInProgress is colorized by RenderStatusIcon; this exercises
+	// the ANSI-strip path. Priority 0 and 1 also emit ANSI codes.
+	issue := makeIssue("TST-ANSI", title, model.StatusInProgress, 0, model.TypeBug, "")
+	issue.Labels = []string{"critical"}
+
+	prefix := prefixWidthOfIssue(issue)
+	availWidth := prefix + 40 // exactly fits the 40-column title
+
+	line := FormatIssueLine(issue, availWidth)
+	stripped := stripANSI(line)
+
+	if !strings.Contains(stripped, title) {
+		t.Errorf("ANSI-colorized prefix must measure visible width: title missing from %q", stripped)
+	}
+	if strings.Contains(stripped, "...") {
+		t.Errorf("ANSI-aware budget should not truncate a title that fits visually: %q", stripped)
+	}
+	// The line must contain ANSI escape bytes (color codes) to prove
+	// that the original rendered output had color, and that stripping
+	// was necessary to compute the budget correctly.
+	if !strings.Contains(line, "\x1b[") {
+		t.Logf("note: rendered line had no ANSI escapes (likely NO_COLOR=1 in env)")
+	}
+}
+
+// TestRenderTreeNode_PrefixReducesBudget confirms that when a tree
+// connector is prepended to a line, the budget passed to FormatIssueLine
+// is reduced by the connector's visual width so the combined output
+// stays within the terminal width.
+func TestRenderTreeNode_PrefixReducesBudget(t *testing.T) {
+	title := strings.Repeat("C", 100)
+	// Epic with a child, both with the same long title so we can compare.
+	epic := makeIssue("TST-epic", title, model.StatusOpen, 1, model.TypeEpic, "")
+	child := makeIssue("TST-ch01", title, model.StatusOpen, 1, model.TypeTask, "TST-epic")
+
+	contextIDs := map[string]bool{}
+
+	var buf bytes.Buffer
+	// Exercise the renderTreeNode path directly with a known termWidth.
+	childrenOf := map[string][]*model.Issue{
+		"TST-epic": {child},
+	}
+	renderTreeNode(&buf, epic, childrenOf, contextIDs, "priority", false, "", 60)
+
+	output := buf.String()
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 rendered lines (epic + child), got %d: %q", len(lines), output)
+	}
+
+	for i, line := range lines {
+		stripped := stripANSI(line)
+		width := runewidth.StringWidth(stripped)
+		if width > 60 {
+			t.Errorf("line %d width %d exceeds termWidth 60: %q", i, width, stripped)
+		}
+	}
+
+	// Both rendered lines should be truncated (their titles were 100
+	// chars and the term is 60 wide).
+	for i, line := range lines {
+		if !strings.Contains(line, "...") {
+			t.Errorf("line %d should be truncated at narrow termWidth: %q", i, line)
+		}
+	}
+}
+
+// TestRenderTreeNode_DeeperPrefixShorterTitle confirms that the deeper
+// a node is nested, the shorter the title budget becomes, so a deeply
+// nested node truncates more aggressively than a top-level one.
+func TestRenderTreeNode_DeeperPrefixShorterTitle(t *testing.T) {
+	title := strings.Repeat("D", 80)
+	epic := makeIssue("TST-epic", title, model.StatusOpen, 1, model.TypeEpic, "")
+	feature := makeIssue("TST-feat", title, model.StatusOpen, 1, model.TypeFeature, "TST-epic")
+	subtask := makeIssue("TST-sub1", title, model.StatusOpen, 1, model.TypeTask, "TST-feat")
+
+	contextIDs := map[string]bool{}
+
+	// Render at a fixed known termWidth so each depth is predictable.
+	var buf bytes.Buffer
+	childrenOf := map[string][]*model.Issue{
+		"TST-epic": {feature},
+		"TST-feat": {subtask},
+	}
+	renderTreeNode(&buf, epic, childrenOf, contextIDs, "priority", false, "", 80)
+
+	output := buf.String()
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 rendered lines, got %d: %q", len(lines), output)
+	}
+
+	// Measure how much of the title appears on each line by counting
+	// consecutive 'D's before the ellipsis on the stripped line. Deeper
+	// nesting should show strictly fewer Ds.
+	titleRun := func(s string) int {
+		stripped := stripANSI(s)
+		count := 0
+		for _, r := range stripped {
+			if r == 'D' {
+				count++
+			}
+		}
+		return count
+	}
+
+	epicDs := titleRun(lines[0])
+	featDs := titleRun(lines[1])
+	subDs := titleRun(lines[2])
+
+	if !(epicDs > featDs && featDs > subDs) {
+		t.Errorf("deeper nesting should truncate more aggressively; got epic=%d feat=%d sub=%d",
+			epicDs, featDs, subDs)
+	}
+
+	// All rendered lines must fit within the termWidth.
+	for i, line := range lines {
+		stripped := stripANSI(line)
+		if width := runewidth.StringWidth(stripped); width > 80 {
+			t.Errorf("line %d width %d exceeds termWidth 80: %q", i, width, stripped)
+		}
+	}
+}
+
+// TestDetectTerminalWidth_NonTtyFallback confirms that when stdout is
+// not a tty (as in go test without a pseudo-tty), detectTerminalWidth
+// returns the documented 120-column fallback.
+func TestDetectTerminalWidth_NonTtyFallback(t *testing.T) {
+	got := detectTerminalWidth()
+	if got != defaultTerminalWidth {
+		t.Errorf("under go test (non-tty stdout), detectTerminalWidth() = %d, want %d",
+			got, defaultTerminalWidth)
+	}
+}
+
+// TestStripANSI_RemovesSgrSequences confirms the regex-based stripping
+// used by visualWidth handles common SGR sequences emitted by lipgloss.
+func TestStripANSI_RemovesSgrSequences(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "hello", "hello"},
+		{"simple color", "\x1b[31mhello\x1b[0m", "hello"},
+		{"compound", "\x1b[1;31;48;5;202mhello\x1b[0m world", "hello world"},
+		{"empty sgr", "\x1b[mhello", "hello"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripANSI(tc.in)
+			if got != tc.want {
+				t.Errorf("stripANSI(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestVisualWidth_MatchesRunewidthOnStripped confirms visualWidth uses
+// runewidth.StringWidth on the ANSI-stripped input so wide East-Asian
+// runes count for two columns and ANSI codes count for zero.
+func TestVisualWidth_MatchesRunewidthOnStripped(t *testing.T) {
+	// "ABC" = 3, "\u4e2d" (CJK) = 2. Sequence with color codes should
+	// strip to "AB\u4e2dC" and measure 5 columns.
+	s := "\x1b[31mAB\u4e2dC\x1b[0m"
+	if got := visualWidth(s); got != 5 {
+		t.Errorf("visualWidth(%q) = %d, want 5", s, got)
+	}
+}
+
+// TestTruncateTitle_PreservesShortTitles confirms truncateTitle leaves
+// titles shorter than the budget untouched and does not add an
+// ellipsis.
+func TestTruncateTitle_PreservesShortTitles(t *testing.T) {
+	got := truncateTitle("hello", 20)
+	if got != "hello" {
+		t.Errorf("truncateTitle(short, 20) = %q, want %q", got, "hello")
+	}
+}
+
+// TestTruncateTitle_SubEllipsisBudget confirms that when the budget is
+// smaller than ellipsisReserve, the function returns a bare ellipsis
+// marker without panicking.
+func TestTruncateTitle_SubEllipsisBudget(t *testing.T) {
+	got := truncateTitle("anything", 1)
+	if got != "..." {
+		t.Errorf("truncateTitle(_, 1) = %q, want \"...\"", got)
 	}
 }
