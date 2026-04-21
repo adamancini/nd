@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/RamXX/nd/internal/model"
@@ -36,22 +38,113 @@ const ellipsisReserve = 3
 // width of a rendered string.
 var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
-// detectTerminalWidth returns the current terminal width in columns for
-// stdout. When stdout is not a tty (pipe, redirect, CI) or when
-// term.GetSize returns an error or non-positive width, it falls back to
-// defaultTerminalWidth (120). The detection reads from os.Stdout.Fd() so
-// callers get the real terminal width of the user's session without any
-// plumbing.
+// detectTerminalWidth returns the visible terminal width in columns for
+// the user's session, honoring the following fallback chain in order
+// (first positive result wins):
+//
+//  1. $COLUMNS environment variable (explicit user override; works under
+//     pty wrappers like watch(1) when the user sets it, and in CI).
+//     Parsed strictly as a positive integer; zero, negative, or
+//     non-numeric values are rejected and the chain continues.
+//  2. term.GetSize(os.Stdout.Fd()) when stdout is a tty. Correct for
+//     the common "nd list" case where output goes straight to the
+//     terminal.
+//  3. term.GetSize(os.Stderr.Fd()) when stderr is a tty (covers the
+//     common `nd list | grep foo` pipe case where stderr is still
+//     attached to the user's terminal).
+//  4. term.GetSize on a freshly-opened /dev/tty file descriptor
+//     (POSIX only; bypasses pty wrappers like watch(1) by reading the
+//     actual controlling terminal). Skipped on Windows.
+//  5. defaultTerminalWidth (120) -- the fail-safe wide default.
+//
+// Callers should treat the returned value as a hint; downstream
+// renderers must still enforce a minimum title floor so negative
+// budgets cannot occur on pathologically narrow terminals.
+//
+// The function never panics, hangs, or leaks file descriptors. The
+// /dev/tty branch opens and closes the descriptor in the same call.
 func detectTerminalWidth() int {
-	fd := int(os.Stdout.Fd())
+	// Step 1: $COLUMNS environment variable.
+	if w, ok := positiveIntFromEnv("COLUMNS"); ok {
+		return w
+	}
+
+	// Step 2: stdout is a tty.
+	if w, ok := widthFromFd(int(os.Stdout.Fd())); ok {
+		return w
+	}
+
+	// Step 3: stderr is a tty (stdout likely piped).
+	if w, ok := widthFromFd(int(os.Stderr.Fd())); ok {
+		return w
+	}
+
+	// Step 4: POSIX /dev/tty (bypasses pty wrappers like watch(1)).
+	if runtime.GOOS != "windows" {
+		if w, ok := widthFromDevTTY(); ok {
+			return w
+		}
+	}
+
+	// Step 5: wide fail-safe default.
+	return defaultTerminalWidth
+}
+
+// positiveIntFromEnv returns the value of the named environment
+// variable parsed as a positive integer. It returns (0, false) when
+// the variable is unset, empty, non-numeric, zero, or negative.
+// Leading/trailing whitespace is tolerated to handle shells that quote
+// values with surrounding spaces.
+func positiveIntFromEnv(name string) (int, bool) {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	if n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// widthFromFd returns (columns, true) when the given file descriptor
+// is a tty and term.GetSize yields a positive width, otherwise
+// (0, false). Used for stdout/stderr probing.
+func widthFromFd(fd int) (int, bool) {
 	if !term.IsTerminal(fd) {
-		return defaultTerminalWidth
+		return 0, false
 	}
 	w, _, err := term.GetSize(fd)
 	if err != nil || w <= 0 {
-		return defaultTerminalWidth
+		return 0, false
 	}
-	return w
+	return w, true
+}
+
+// widthFromDevTTY opens the controlling terminal device /dev/tty
+// (POSIX), queries its size, and closes it. Returns (columns, true)
+// on success, (0, false) if /dev/tty cannot be opened (e.g. no
+// controlling terminal, CI) or GetSize fails. The file descriptor is
+// always closed before return so the function does not leak fds.
+//
+// This fallback is the workaround for pty wrappers like watch(1)
+// which give the child process its own pty; stdout/stderr then report
+// that pty's size, but /dev/tty still points at the user's real
+// terminal.
+func widthFromDevTTY() (int, bool) {
+	f, err := os.Open("/dev/tty")
+	if err != nil {
+		return 0, false
+	}
+	defer f.Close()
+	w, _, err := term.GetSize(int(f.Fd()))
+	if err != nil || w <= 0 {
+		return 0, false
+	}
+	return w, true
 }
 
 // stripANSI removes ANSI SGR escape sequences from s. Used so the

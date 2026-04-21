@@ -575,13 +575,139 @@ func TestRenderTreeNode_DeeperPrefixShorterTitle(t *testing.T) {
 }
 
 // TestDetectTerminalWidth_NonTtyFallback confirms that when stdout is
-// not a tty (as in go test without a pseudo-tty), detectTerminalWidth
-// returns the documented 120-column fallback.
+// not a tty (as in go test without a pseudo-tty) and $COLUMNS is unset,
+// detectTerminalWidth falls back through the remaining chain to the
+// documented 120-column default.
+//
+// Under `go test`, stdout is not a tty, stderr is not a tty, and
+// /dev/tty is only reachable on POSIX. On platforms where /dev/tty
+// returns a width (e.g. developer running `go test` from an interactive
+// terminal), the result may be that terminal's width. Accept either the
+// default or any positive width reported by /dev/tty.
 func TestDetectTerminalWidth_NonTtyFallback(t *testing.T) {
+	// Make sure a stale $COLUMNS in the developer's shell doesn't
+	// override the fallback we want to test here.
+	t.Setenv("COLUMNS", "")
+
 	got := detectTerminalWidth()
-	if got != defaultTerminalWidth {
-		t.Errorf("under go test (non-tty stdout), detectTerminalWidth() = %d, want %d",
-			got, defaultTerminalWidth)
+	if got <= 0 {
+		t.Errorf("detectTerminalWidth() = %d, want a positive width", got)
+	}
+	// Either the documented default, or a real /dev/tty width. Both
+	// are acceptable; the important invariant is >0 and deterministic.
+	// (On CI where there is no /dev/tty, this will be the default.)
+}
+
+// TestDetectTerminalWidth_EnvColumnsOverride confirms that when
+// $COLUMNS is set to a valid positive integer, detectTerminalWidth
+// returns that value regardless of stdout/stderr tty state.
+func TestDetectTerminalWidth_EnvColumnsOverride(t *testing.T) {
+	t.Setenv("COLUMNS", "40")
+	got := detectTerminalWidth()
+	if got != 40 {
+		t.Errorf("detectTerminalWidth() with COLUMNS=40 = %d, want 40", got)
+	}
+}
+
+// TestDetectTerminalWidth_EnvColumnsPrecedence confirms that the
+// $COLUMNS override wins even when later fallbacks would produce a
+// different positive width. This is the watch(1) workaround path: the
+// user sets COLUMNS and expects it to win even if stdout happens to be
+// a tty with a different size.
+func TestDetectTerminalWidth_EnvColumnsPrecedence(t *testing.T) {
+	t.Setenv("COLUMNS", "55")
+	got := detectTerminalWidth()
+	if got != 55 {
+		t.Errorf("detectTerminalWidth() with COLUMNS=55 = %d, want 55 (env must win over tty detection)", got)
+	}
+}
+
+// TestDetectTerminalWidth_EnvColumnsInvalid confirms that non-numeric
+// $COLUMNS values are ignored and the function falls through to the
+// next source without panicking.
+func TestDetectTerminalWidth_EnvColumnsInvalid(t *testing.T) {
+	t.Setenv("COLUMNS", "not-a-number")
+	got := detectTerminalWidth()
+	if got <= 0 {
+		t.Errorf("detectTerminalWidth() with invalid COLUMNS = %d, want a positive fallback", got)
+	}
+	// Must NOT be interpreted as 0 / the string length / anything weird.
+	// Since we explicitly want the fallback, ensure we didn't accidentally
+	// parse "not-a-number" as anything.
+	if got == 0 {
+		t.Errorf("detectTerminalWidth() must not return 0 for invalid COLUMNS")
+	}
+}
+
+// TestDetectTerminalWidth_EnvColumnsZero confirms that COLUMNS=0 is
+// rejected (not treated as a valid width) and the function falls
+// through to subsequent sources.
+func TestDetectTerminalWidth_EnvColumnsZero(t *testing.T) {
+	t.Setenv("COLUMNS", "0")
+	got := detectTerminalWidth()
+	if got == 0 {
+		t.Errorf("detectTerminalWidth() with COLUMNS=0 returned 0; must reject and fall through")
+	}
+	if got <= 0 {
+		t.Errorf("detectTerminalWidth() = %d, want a positive fallback width", got)
+	}
+}
+
+// TestDetectTerminalWidth_EnvColumnsNegative confirms that COLUMNS=-5
+// is rejected and the function falls through to subsequent sources.
+func TestDetectTerminalWidth_EnvColumnsNegative(t *testing.T) {
+	t.Setenv("COLUMNS", "-5")
+	got := detectTerminalWidth()
+	if got < 0 {
+		t.Errorf("detectTerminalWidth() with COLUMNS=-5 returned %d; must reject and fall through", got)
+	}
+	if got <= 0 {
+		t.Errorf("detectTerminalWidth() = %d, want a positive fallback width", got)
+	}
+}
+
+// TestDetectTerminalWidth_EnvColumnsTrimmed confirms that whitespace
+// around the COLUMNS value is handled gracefully (either trimmed and
+// accepted, or rejected as invalid -- both are acceptable; the
+// function must not crash).
+func TestDetectTerminalWidth_EnvColumnsTrimmed(t *testing.T) {
+	t.Setenv("COLUMNS", "  42  ")
+	got := detectTerminalWidth()
+	if got <= 0 {
+		t.Errorf("detectTerminalWidth() = %d, want a positive width", got)
+	}
+	// Accept either 42 (trimmed and parsed) or a fallback. Both are
+	// reasonable; strconv.Atoi without TrimSpace would reject it.
+}
+
+// TestDetectTerminalWidth_NoPanic confirms the function never panics
+// across a matrix of COLUMNS values, including some degenerate ones.
+// This is the "unwanted behavior" acceptance criterion: no panic, no
+// hang, no fd leak.
+func TestDetectTerminalWidth_NoPanic(t *testing.T) {
+	cases := []string{
+		"",               // empty
+		" ",              // whitespace only
+		"0",              // zero
+		"-1",             // negative
+		"abc",            // non-numeric
+		"99999999999999", // huge
+		"1",              // minimum positive
+	}
+	for _, c := range cases {
+		c := c
+		t.Run("COLUMNS="+c, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("detectTerminalWidth() panicked with COLUMNS=%q: %v", c, r)
+				}
+			}()
+			t.Setenv("COLUMNS", c)
+			got := detectTerminalWidth()
+			if got <= 0 {
+				t.Errorf("detectTerminalWidth() with COLUMNS=%q = %d, want positive", c, got)
+			}
+		})
 	}
 }
 
