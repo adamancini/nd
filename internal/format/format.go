@@ -29,6 +29,15 @@ const defaultTerminalWidth = 120
 // negative-length slice panic.
 const minTitleFloor = 10
 
+// reasonableTitleFloor is the budget threshold that triggers optional-column
+// drops during rendering. When the remaining title budget would fall below
+// this value, the column-drop ladder (labels -> assignee -> type -> priority)
+// advances another step. Set to 2*minTitleFloor so a scannable ~20-column
+// title window is preserved whenever droppable columns remain. Lines below
+// minTitleFloor are only produced after every optional column has already
+// been dropped (minimum-viable-line regime, AC7 boundary at ~30 cols).
+const reasonableTitleFloor = 2 * minTitleFloor
+
 // ellipsisReserve is the number of columns reserved for the trailing "..."
 // marker when a title has to be truncated.
 const ellipsisReserve = 3
@@ -199,39 +208,94 @@ func FormatIssueLine(issue *model.Issue, availWidth int) string {
 		prefix := fmt.Sprintf("%s %s [P%d] [%s] - ",
 			ui.StatusIconClosed, issue.ID, issue.Priority, issue.Type)
 		prefixWidth := visualWidth(prefix)
-		budget := availWidth - prefixWidth
-		if budget < minTitleFloor {
-			budget = minTitleFloor
-		}
+		budget := max(availWidth-prefixWidth, minTitleFloor)
 		title := truncateTitle(issue.Title, budget)
 		line := fmt.Sprintf("%s %s [P%d] [%s] - %s",
 			ui.StatusIconClosed, issue.ID, issue.Priority, issue.Type, title)
 		return ui.RenderClosedLine(line)
 	}
 
-	var parts []string
-	parts = append(parts, ui.RenderStatusIcon(status))
-	parts = append(parts, ui.RenderID(issue.ID))
-	parts = append(parts, fmt.Sprintf("[%s]", ui.RenderPriority(int(issue.Priority))))
-	parts = append(parts, fmt.Sprintf("[%s]", ui.RenderType(string(issue.Type))))
-	if issue.Assignee != "" {
-		parts = append(parts, fmt.Sprintf("@%s", issue.Assignee))
+	// Required (must-keep) columns: status icon, ID, and -- after all
+	// optional columns are resolved -- a (possibly truncated) title.
+	iconPart := ui.RenderStatusIcon(status)
+	idPart := ui.RenderID(issue.ID)
+
+	// Optional columns, ordered from LAST-to-drop (priority) to
+	// FIRST-to-drop (labels). The algorithm below walks the slice in
+	// reverse order, removing one optional column per iteration until
+	// the prefix plus a minTitleFloor-wide title fits in availWidth.
+	// Drop order per PAI-xvpv spec: labels -> assignee -> type -> priority.
+	type optionalCol struct {
+		present bool
+		text    string
 	}
-	if len(issue.Labels) > 0 {
-		parts = append(parts, fmt.Sprintf("[%s]", strings.Join(issue.Labels, ", ")))
+	priorityCol := optionalCol{
+		present: true,
+		text:    fmt.Sprintf("[%s]", ui.RenderPriority(int(issue.Priority))),
+	}
+	typeCol := optionalCol{
+		present: true,
+		text:    fmt.Sprintf("[%s]", ui.RenderType(string(issue.Type))),
+	}
+	assigneeCol := optionalCol{
+		present: issue.Assignee != "",
+	}
+	if assigneeCol.present {
+		assigneeCol.text = fmt.Sprintf("@%s", issue.Assignee)
+	}
+	labelsCol := optionalCol{
+		present: len(issue.Labels) > 0,
+	}
+	if labelsCol.present {
+		labelsCol.text = fmt.Sprintf("[%s]", strings.Join(issue.Labels, ", "))
 	}
 
-	// Compute the visual width of the non-title prefix. The prefix is:
-	//   <joined parts> <space> "- "
-	// because parts are joined with a single space and the separator
-	// itself ("- ") starts the title segment.
-	joinedPrefix := strings.Join(parts, " ")
-	// Account for the trailing " - " separator before the title.
-	prefixWidth := visualWidth(joinedPrefix) + len(" - ")
-	budget := availWidth - prefixWidth
-	if budget < minTitleFloor {
-		budget = minTitleFloor
+	// buildParts reassembles the prefix parts slice given the current
+	// presence flags. Order matches the historical rendering:
+	// icon, id, priority, type, assignee, labels.
+	buildParts := func() []string {
+		parts := []string{iconPart, idPart}
+		if priorityCol.present {
+			parts = append(parts, priorityCol.text)
+		}
+		if typeCol.present {
+			parts = append(parts, typeCol.text)
+		}
+		if assigneeCol.present {
+			parts = append(parts, assigneeCol.text)
+		}
+		if labelsCol.present {
+			parts = append(parts, labelsCol.text)
+		}
+		return parts
 	}
+
+	// prefixVisualWidth returns the visual width of the joined prefix
+	// (parts joined with single spaces) plus the " - " title separator.
+	prefixVisualWidth := func(parts []string) int {
+		return visualWidth(strings.Join(parts, " ")) + len(" - ")
+	}
+
+	// Drop order: labels first, then assignee, then type, then priority.
+	// After each drop, recompute the prefix width and stop as soon as
+	// the prefix + minTitleFloor fits within availWidth. Once no more
+	// droppable columns remain, fall through to the title-floor guard
+	// so pathologically narrow terminals (< minimum-viable-line) still
+	// produce a scannable line rather than panicking.
+	dropCandidates := []*optionalCol{&labelsCol, &assigneeCol, &typeCol, &priorityCol}
+	for _, cand := range dropCandidates {
+		parts := buildParts()
+		if prefixVisualWidth(parts)+reasonableTitleFloor <= availWidth {
+			break
+		}
+		if cand.present {
+			cand.present = false
+		}
+	}
+
+	parts := buildParts()
+	prefixWidth := prefixVisualWidth(parts)
+	budget := max(availWidth-prefixWidth, minTitleFloor)
 	title := truncateTitle(issue.Title, budget)
 
 	parts = append(parts, fmt.Sprintf("- %s", title))

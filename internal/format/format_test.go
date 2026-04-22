@@ -695,7 +695,6 @@ func TestDetectTerminalWidth_NoPanic(t *testing.T) {
 		"1",              // minimum positive
 	}
 	for _, c := range cases {
-		c := c
 		t.Run("COLUMNS="+c, func(t *testing.T) {
 			defer func() {
 				if r := recover(); r != nil {
@@ -763,5 +762,236 @@ func TestTruncateTitle_SubEllipsisBudget(t *testing.T) {
 	got := truncateTitle("anything", 1)
 	if got != "..." {
 		t.Errorf("truncateTitle(_, 1) = %q, want \"...\"", got)
+	}
+}
+
+// makeRichIssue builds a representative open issue with every optional
+// prefix column populated: a priority tag, a type tag, an assignee, and
+// two labels. Used by the width-bucketed column-drop tests to exercise
+// the full drop ladder (labels -> assignee -> type -> priority).
+func makeRichIssue() *model.Issue {
+	issue := makeIssue("TST-WIDE", "Implement the new terminal renderer", model.StatusOpen, 2, model.TypeTask, "")
+	issue.Assignee = "alice"
+	issue.Labels = []string{"frontend", "music-theory"}
+	return issue
+}
+
+// TestFormatIssueLine_Width120_FullPrefix is the wide-terminal regression
+// guard. At 120 columns every optional prefix column (priority, type,
+// assignee, labels) must still render.
+func TestFormatIssueLine_Width120_FullPrefix(t *testing.T) {
+	issue := makeRichIssue()
+	line := FormatIssueLine(issue, 120)
+	stripped := stripANSI(line)
+
+	for _, want := range []string{"TST-WIDE", "P2", "[task]", "@alice", "frontend", "music-theory", "Implement the new terminal renderer"} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("width=120 rendering should contain %q, got %q", want, stripped)
+		}
+	}
+	if got := runewidth.StringWidth(stripped); got > 120 {
+		t.Errorf("width=120 rendered width %d exceeds budget: %q", got, stripped)
+	}
+}
+
+// TestFormatIssueLine_Width80_FullPrefix confirms that an 80-col
+// terminal -- the historical baseline -- still renders every prefix
+// column for a typical issue.
+func TestFormatIssueLine_Width80_FullPrefix(t *testing.T) {
+	issue := makeRichIssue()
+	line := FormatIssueLine(issue, 80)
+	stripped := stripANSI(line)
+
+	for _, want := range []string{"TST-WIDE", "P2", "[task]", "@alice", "frontend", "music-theory"} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("width=80 rendering should contain %q, got %q", want, stripped)
+		}
+	}
+	if got := runewidth.StringWidth(stripped); got > 80 {
+		t.Errorf("width=80 rendered width %d exceeds budget: %q", got, stripped)
+	}
+}
+
+// TestFormatIssueLine_Width60_DropsLabels confirms that at 60 columns
+// the labels column is dropped first while the shorter assignee / type
+// / priority tags remain.
+func TestFormatIssueLine_Width60_DropsLabels(t *testing.T) {
+	issue := makeRichIssue()
+	line := FormatIssueLine(issue, 60)
+	stripped := stripANSI(line)
+
+	if strings.Contains(stripped, "frontend") || strings.Contains(stripped, "music-theory") {
+		t.Errorf("width=60 should drop labels, got %q", stripped)
+	}
+	for _, want := range []string{"TST-WIDE", "P2", "[task]", "@alice"} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("width=60 should still contain %q, got %q", want, stripped)
+		}
+	}
+	if got := runewidth.StringWidth(stripped); got > 60 {
+		t.Errorf("width=60 rendered width %d exceeds budget: %q", got, stripped)
+	}
+}
+
+// TestFormatIssueLine_Width50_DropsLabelsAndAssignee confirms that at
+// 50 columns both labels and the assignee column are dropped, but the
+// type and priority tags are still visible.
+func TestFormatIssueLine_Width50_DropsLabelsAndAssignee(t *testing.T) {
+	issue := makeRichIssue()
+	line := FormatIssueLine(issue, 50)
+	stripped := stripANSI(line)
+
+	if strings.Contains(stripped, "frontend") || strings.Contains(stripped, "music-theory") {
+		t.Errorf("width=50 should drop labels, got %q", stripped)
+	}
+	if strings.Contains(stripped, "@alice") {
+		t.Errorf("width=50 should drop assignee, got %q", stripped)
+	}
+	for _, want := range []string{"TST-WIDE", "P2", "[task]"} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("width=50 should still contain %q, got %q", want, stripped)
+		}
+	}
+	if got := runewidth.StringWidth(stripped); got > 50 {
+		t.Errorf("width=50 rendered width %d exceeds budget: %q", got, stripped)
+	}
+}
+
+// TestFormatIssueLine_Width40_DropsLabelsAssigneeType confirms that at
+// 40 columns the type tag is dropped in addition to labels and
+// assignee, leaving only the priority tag among optional columns.
+func TestFormatIssueLine_Width40_DropsLabelsAssigneeType(t *testing.T) {
+	issue := makeRichIssue()
+	line := FormatIssueLine(issue, 40)
+	stripped := stripANSI(line)
+
+	if strings.Contains(stripped, "frontend") || strings.Contains(stripped, "music-theory") {
+		t.Errorf("width=40 should drop labels, got %q", stripped)
+	}
+	if strings.Contains(stripped, "@alice") {
+		t.Errorf("width=40 should drop assignee, got %q", stripped)
+	}
+	if strings.Contains(stripped, "[task]") {
+		t.Errorf("width=40 should drop type tag, got %q", stripped)
+	}
+	for _, want := range []string{"TST-WIDE", "P2"} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("width=40 should still contain %q, got %q", want, stripped)
+		}
+	}
+	if got := runewidth.StringWidth(stripped); got > 40 {
+		t.Errorf("width=40 rendered width %d exceeds budget: %q", got, stripped)
+	}
+}
+
+// TestFormatIssueLine_Width30_DropsAllOptional confirms that at 30
+// columns every optional column has been dropped, leaving only the
+// status icon, ID, and a (truncated) title.
+func TestFormatIssueLine_Width30_DropsAllOptional(t *testing.T) {
+	issue := makeRichIssue()
+	line := FormatIssueLine(issue, 30)
+	stripped := stripANSI(line)
+
+	for _, unwanted := range []string{"frontend", "music-theory", "@alice", "[task]", "P2"} {
+		if strings.Contains(stripped, unwanted) {
+			t.Errorf("width=30 should drop %q, got %q", unwanted, stripped)
+		}
+	}
+	if !strings.Contains(stripped, "TST-WIDE") {
+		t.Errorf("width=30 must keep ID, got %q", stripped)
+	}
+	if got := runewidth.StringWidth(stripped); got > 30 {
+		t.Errorf("width=30 rendered width %d exceeds budget: %q", got, stripped)
+	}
+}
+
+// TestFormatIssueLine_Width20_HitsTitleFloor confirms that at 20
+// columns -- which is below the minimum-viable-line threshold -- every
+// optional column is dropped and the title falls to minTitleFloor. The
+// resulting line is allowed to exceed availWidth only in this
+// pathological regime (AC7 bounds the no-wrap guarantee at >=30 cols).
+func TestFormatIssueLine_Width20_HitsTitleFloor(t *testing.T) {
+	issue := makeRichIssue()
+	line := FormatIssueLine(issue, 20)
+	stripped := stripANSI(line)
+
+	for _, unwanted := range []string{"frontend", "music-theory", "@alice", "[task]", "P2"} {
+		if strings.Contains(stripped, unwanted) {
+			t.Errorf("width=20 should drop %q, got %q", unwanted, stripped)
+		}
+	}
+	if !strings.Contains(stripped, "TST-WIDE") {
+		t.Errorf("width=20 must keep ID, got %q", stripped)
+	}
+	if !strings.Contains(stripped, "...") {
+		t.Errorf("width=20 should truncate title with ellipsis, got %q", stripped)
+	}
+}
+
+// TestFormatIssueLine_NoLabels_SkipsDropOfLabels confirms that when the
+// issue has no labels, the drop order starts at the assignee column
+// instead of labels (which are absent).
+func TestFormatIssueLine_NoLabels_SkipsDropOfLabels(t *testing.T) {
+	issue := makeIssue("TST-NOLB", "Title without labels", model.StatusOpen, 2, model.TypeTask, "")
+	issue.Assignee = "bob"
+	// No labels.
+
+	// At 50 cols, labels would normally be dropped first but there are
+	// no labels, so the drop ladder moves on to assignee.
+	line := FormatIssueLine(issue, 50)
+	stripped := stripANSI(line)
+
+	if strings.Contains(stripped, "@bob") {
+		t.Errorf("width=50 no-labels issue should drop assignee next, got %q", stripped)
+	}
+	for _, want := range []string{"TST-NOLB", "P2", "[task]"} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("width=50 no-labels issue should still contain %q, got %q", want, stripped)
+		}
+	}
+	if got := runewidth.StringWidth(stripped); got > 50 {
+		t.Errorf("no-labels width=50 rendered width %d exceeds budget: %q", got, stripped)
+	}
+}
+
+// TestFormatIssueLine_VisualWidthNoANSI confirms that drop decisions
+// are based on visual (ANSI-stripped) width, not raw byte length. An
+// issue rendered with color codes should drop columns at the same
+// width thresholds as one without color.
+func TestFormatIssueLine_VisualWidthNoANSI(t *testing.T) {
+	// Priority 0 (highest) emits ANSI color codes via RenderPriority; the
+	// "critical" label also adds visual weight. At 60 cols, labels must
+	// still drop regardless of how many ANSI escape bytes the colorized
+	// prefix contains.
+	issue := makeIssue("TST-ANS2", "A reasonably titled issue", model.StatusInProgress, 0, model.TypeBug, "")
+	issue.Assignee = "carol"
+	issue.Labels = []string{"critical", "security-hardening"}
+
+	line := FormatIssueLine(issue, 60)
+	stripped := stripANSI(line)
+
+	if strings.Contains(stripped, "critical") || strings.Contains(stripped, "security-hardening") {
+		t.Errorf("width=60 with ANSI colors should drop labels by visual width, got %q", stripped)
+	}
+	if got := runewidth.StringWidth(stripped); got > 60 {
+		t.Errorf("ANSI-aware drop: rendered width %d exceeds budget 60: %q", got, stripped)
+	}
+}
+
+// TestFormatIssueLine_ResultingLineFitsWidth is a property-style test:
+// across widths 30..160 step 10, the rendered line's visual width must
+// be <= availWidth for a typical issue (AC5). Widths below 30 are
+// excluded per AC7 which only guarantees no-wrap at >= 30 cols.
+func TestFormatIssueLine_ResultingLineFitsWidth(t *testing.T) {
+	issue := makeRichIssue()
+	// Use a 40-char title per the story spec.
+	issue.Title = strings.Repeat("x", 40)
+
+	for w := 30; w <= 160; w += 10 {
+		line := FormatIssueLine(issue, w)
+		stripped := stripANSI(line)
+		if got := runewidth.StringWidth(stripped); got > w {
+			t.Errorf("width=%d: rendered width %d exceeds availWidth: %q", w, got, stripped)
+		}
 	}
 }
