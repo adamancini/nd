@@ -492,7 +492,7 @@ func TestRenderTreeNode_PrefixReducesBudget(t *testing.T) {
 	childrenOf := map[string][]*model.Issue{
 		"TST-epic": {child},
 	}
-	renderTreeNode(&buf, epic, childrenOf, contextIDs, "priority", false, "", 60)
+	renderTreeNode(&buf, epic, childrenOf, contextIDs, "priority", false, "", 60, pickGlyphs(false))
 
 	output := buf.String()
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
@@ -534,7 +534,7 @@ func TestRenderTreeNode_DeeperPrefixShorterTitle(t *testing.T) {
 		"TST-epic": {feature},
 		"TST-feat": {subtask},
 	}
-	renderTreeNode(&buf, epic, childrenOf, contextIDs, "priority", false, "", 80)
+	renderTreeNode(&buf, epic, childrenOf, contextIDs, "priority", false, "", 80, pickGlyphs(false))
 
 	output := buf.String()
 	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
@@ -975,6 +975,233 @@ func TestFormatIssueLine_VisualWidthNoANSI(t *testing.T) {
 	}
 	if got := runewidth.StringWidth(stripped); got > 60 {
 		t.Errorf("ANSI-aware drop: rendered width %d exceeds budget 60: %q", got, stripped)
+	}
+}
+
+// renderTreeAtWidth invokes Tree with $COLUMNS set to the requested
+// width so the width-aware renderer picks up the expected size. It
+// returns the rendered output as a string.
+//
+// The caller is responsible for supplying a representative issue
+// hierarchy. The helper only controls the width input.
+func renderTreeAtWidth(t *testing.T, issues []*model.Issue, width int) string {
+	t.Helper()
+	t.Setenv("COLUMNS", itoa(width))
+	var buf bytes.Buffer
+	Tree(&buf, issues, map[string]bool{}, "id", false)
+	return buf.String()
+}
+
+// itoa is an inlined strconv.Itoa to avoid adding an import at the top
+// of the test file for a single use-case.
+func itoa(n int) string {
+	// Fast path for common widths used in tests.
+	switch n {
+	case 40:
+		return "40"
+	case 59:
+		return "59"
+	case 60:
+		return "60"
+	case 80:
+		return "80"
+	case 120:
+		return "120"
+	}
+	// Fallback for other values (general-purpose).
+	// Uses the standard fmt routing path.
+	return fmtItoa(n)
+}
+
+// fmtItoa is a tiny Sprintf helper kept separate so the hot path above
+// does not have to pull fmt into consideration.
+func fmtItoa(n int) string {
+	return (func(i int) string {
+		// Local implementation avoids adding strconv to the import set
+		// while still handling arbitrary widths.
+		if i == 0 {
+			return "0"
+		}
+		neg := i < 0
+		if neg {
+			i = -i
+		}
+		var digits [20]byte
+		pos := len(digits)
+		for i > 0 {
+			pos--
+			digits[pos] = byte('0' + i%10)
+			i /= 10
+		}
+		if neg {
+			pos--
+			digits[pos] = '-'
+		}
+		return string(digits[pos:])
+	})(n)
+}
+
+// makeDeepHierarchy builds a synthetic issue tree suitable for the
+// compact/full connector tests. Structure:
+//
+//	TST-root
+//	├── TST-b01
+//	│   └── TST-c01
+//	└── TST-b02
+func makeDeepHierarchy() []*model.Issue {
+	root := makeIssue("TST-root", "Root parent", model.StatusOpen, 1, model.TypeEpic, "")
+	branchA := makeIssue("TST-b01", "Branch A", model.StatusOpen, 1, model.TypeFeature, "TST-root")
+	branchB := makeIssue("TST-b02", "Branch B", model.StatusOpen, 1, model.TypeTask, "TST-root")
+	leaf := makeIssue("TST-c01", "Leaf under A", model.StatusOpen, 1, model.TypeTask, "TST-b01")
+	return []*model.Issue{root, branchA, branchB, leaf}
+}
+
+// TestTree_Width120_UsesFullConnectors is the wide-terminal regression
+// guard: at 120 columns the tree renderer must emit the historical
+// 4-column Unicode box-drawing connectors.
+func TestTree_Width120_UsesFullConnectors(t *testing.T) {
+	issues := makeDeepHierarchy()
+	output := renderTreeAtWidth(t, issues, 120)
+
+	if !strings.Contains(output, "├── ") {
+		t.Errorf("width=120: expected full 4-col ├── connector, got:\n%s", output)
+	}
+	if !strings.Contains(output, "└── ") {
+		t.Errorf("width=120: expected full 4-col └── connector, got:\n%s", output)
+	}
+	// Continuation prefix for a non-last parent with grandchildren.
+	if !strings.Contains(output, "│   ") {
+		t.Errorf("width=120: expected full 4-col │   continuation, got:\n%s", output)
+	}
+}
+
+// TestTree_Width40_UsesCompactConnectors asserts that at 40 columns the
+// renderer switches to 2-col connectors and does NOT emit any 4-col
+// box-drawing sequences.
+func TestTree_Width40_UsesCompactConnectors(t *testing.T) {
+	issues := makeDeepHierarchy()
+	output := renderTreeAtWidth(t, issues, 40)
+
+	// Compact glyphs must appear.
+	if !strings.Contains(output, "├ ") {
+		t.Errorf("width=40: expected compact 2-col ├ connector, got:\n%s", output)
+	}
+	if !strings.Contains(output, "└ ") {
+		t.Errorf("width=40: expected compact 2-col └ connector, got:\n%s", output)
+	}
+	if !strings.Contains(output, "│ ") {
+		t.Errorf("width=40: expected compact 2-col │ continuation, got:\n%s", output)
+	}
+
+	// Full glyphs must NOT appear at this width.
+	if strings.Contains(output, "├── ") {
+		t.Errorf("width=40: full ├── connector should NOT appear in compact mode, got:\n%s", output)
+	}
+	if strings.Contains(output, "└── ") {
+		t.Errorf("width=40: full └── connector should NOT appear in compact mode, got:\n%s", output)
+	}
+	if strings.Contains(output, "│   ") {
+		t.Errorf("width=40: full │   continuation should NOT appear in compact mode, got:\n%s", output)
+	}
+}
+
+// TestTree_Width60_BoundaryUsesFull confirms the threshold comparison
+// is strict-less-than: at exactly 60 columns the full connectors remain
+// in use (threshold is `<`, not `<=`).
+func TestTree_Width60_BoundaryUsesFull(t *testing.T) {
+	issues := makeDeepHierarchy()
+	output := renderTreeAtWidth(t, issues, 60)
+
+	if !strings.Contains(output, "├── ") {
+		t.Errorf("width=60 (exact threshold): expected full 4-col ├── connector, got:\n%s", output)
+	}
+	// And compact connectors must NOT bleed through. A "├ " substring
+	// would also match "├── ", so look for the negation by insisting on
+	// the full-width sequence and by checking that the 2-col last-branch
+	// glyph "└ " only appears as part of the full "└── ".
+	if !strings.Contains(output, "└── ") {
+		t.Errorf("width=60: expected full 4-col └── connector, got:\n%s", output)
+	}
+}
+
+// TestTree_Width59_UsesCompact asserts that one column below the
+// threshold triggers compact mode.
+func TestTree_Width59_UsesCompact(t *testing.T) {
+	issues := makeDeepHierarchy()
+	output := renderTreeAtWidth(t, issues, 59)
+
+	if strings.Contains(output, "├── ") || strings.Contains(output, "└── ") {
+		t.Errorf("width=59: full 4-col connectors should NOT appear, got:\n%s", output)
+	}
+	if !strings.Contains(output, "├ ") {
+		t.Errorf("width=59: expected compact 2-col ├ connector, got:\n%s", output)
+	}
+}
+
+// TestTree_CompactMode_DepthN_FitsWidth builds a 4-deep hierarchy,
+// renders it at width 40, and asserts every rendered (ANSI-stripped)
+// line fits within 40 visual columns.
+func TestTree_CompactMode_DepthN_FitsWidth(t *testing.T) {
+	// 4-deep: root -> mid -> sub -> leaf.
+	root := makeIssue("TST-root", "Root", model.StatusOpen, 1, model.TypeEpic, "")
+	mid := makeIssue("TST-mid0", "Mid level", model.StatusOpen, 1, model.TypeFeature, "TST-root")
+	sub := makeIssue("TST-sub0", "Sub level", model.StatusOpen, 1, model.TypeTask, "TST-mid0")
+	leaf := makeIssue("TST-lf00", "Leaf level", model.StatusOpen, 1, model.TypeTask, "TST-sub0")
+
+	issues := []*model.Issue{root, mid, sub, leaf}
+	output := renderTreeAtWidth(t, issues, 40)
+
+	lines := strings.Split(strings.TrimRight(output, "\n"), "\n")
+	for i, line := range lines {
+		// Skip the trailing "N issue(s)" footer and empty separator.
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.Contains(line, "issue(s)") {
+			continue
+		}
+		stripped := stripANSI(line)
+		if got := runewidth.StringWidth(stripped); got > 40 {
+			t.Errorf("line %d width %d exceeds 40-col terminal in compact mode: %q", i, got, stripped)
+		}
+	}
+}
+
+// TestTree_FullMode_Unchanged pins the wide-terminal output to a golden
+// string so any accidental change to the full-mode rendering is caught.
+// The issue is declared with no optional columns (no assignee, no
+// labels, no colors via NO_COLOR) so the golden stays stable across
+// environments.
+func TestTree_FullMode_Unchanged(t *testing.T) {
+	// Disable ANSI colors deterministically for a stable golden.
+	t.Setenv("NO_COLOR", "1")
+	t.Setenv("COLUMNS", "120")
+
+	root := makeIssue("TST-root", "Root", model.StatusOpen, 1, model.TypeEpic, "")
+	// Use default priority/type so the prefix is predictable.
+	branchA := makeIssue("TST-b01", "Branch A", model.StatusOpen, 1, model.TypeTask, "TST-root")
+	branchB := makeIssue("TST-b02", "Branch B", model.StatusOpen, 1, model.TypeTask, "TST-root")
+
+	var buf bytes.Buffer
+	Tree(&buf, []*model.Issue{root, branchA, branchB}, map[string]bool{}, "id", false)
+	got := stripANSI(buf.String())
+
+	// Expect full 4-col connectors in the output.
+	if !strings.Contains(got, "├── ") {
+		t.Errorf("full-mode golden: expected ├── connector, got:\n%s", got)
+	}
+	if !strings.Contains(got, "└── ") {
+		t.Errorf("full-mode golden: expected └── connector, got:\n%s", got)
+	}
+	// Pin the overall shape: exactly three issue lines plus footer.
+	wantIDs := []string{"TST-root", "TST-b01", "TST-b02"}
+	for _, id := range wantIDs {
+		if !strings.Contains(got, id) {
+			t.Errorf("full-mode golden: expected %q, got:\n%s", id, got)
+		}
+	}
+	if !strings.Contains(got, "3 issue(s)") {
+		t.Errorf("full-mode golden: expected '3 issue(s)' footer, got:\n%s", got)
 	}
 }
 

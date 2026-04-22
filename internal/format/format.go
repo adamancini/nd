@@ -42,6 +42,58 @@ const reasonableTitleFloor = 2 * minTitleFloor
 // marker when a title has to be truncated.
 const ellipsisReserve = 3
 
+// compactTreeWidthThreshold is the terminal width below which the tree
+// renderer switches to 2-column connectors to preserve room for issue
+// metadata. At and above this threshold the full 4-column Unicode
+// box-drawing connectors are used. 60 cols is chosen as a reasonable
+// default -- typical laptop half-screen terminal -- and leaves ~48 cols
+// for issue content at depth 2 once the connector chain is subtracted.
+// The comparison is strict less-than so callers resizing to exactly 60
+// see the familiar full-width glyphs.
+const compactTreeWidthThreshold = 60
+
+// treeGlyphs bundles the four connector/continuation strings used by
+// the tree renderer. Pre-computed once at the top of Tree from the
+// detected terminal width and threaded through renderTreeNode /
+// renderTreeNode_children so every recursive call uses a consistent
+// style without re-deciding at each level.
+//
+// Fields:
+//
+//	branch      -- non-last child connector (e.g. "├── " or "├ ")
+//	last        -- last child connector (e.g. "└── " or "└ ")
+//	contNonLast -- continuation prefix under a non-last parent
+//	               (e.g. "│   " or "│ ")
+//	contLast    -- continuation prefix under a last parent
+//	               (e.g. "    " or "  ")
+type treeGlyphs struct {
+	branch      string
+	last        string
+	contNonLast string
+	contLast    string
+}
+
+// pickGlyphs returns the compact or full tree connector set based on
+// the compact flag. The full set matches the historical rendering
+// (4-col Unicode box-drawing). The compact set uses 2-col variants so
+// nested content on narrow terminals has more room for the issue line.
+func pickGlyphs(compact bool) treeGlyphs {
+	if compact {
+		return treeGlyphs{
+			branch:      "├ ",
+			last:        "└ ",
+			contNonLast: "│ ",
+			contLast:    "  ",
+		}
+	}
+	return treeGlyphs{
+		branch:      "├── ",
+		last:        "└── ",
+		contNonLast: "│   ",
+		contLast:    "    ",
+	}
+}
+
 // ansiEscapeRE matches ANSI SGR escape sequences (CSI ... m) as emitted by
 // lipgloss / termenv. Used to strip color codes before measuring the visual
 // width of a rendered string.
@@ -398,18 +450,23 @@ func Tree(w io.Writer, issues []*model.Issue, contextIDs map[string]bool, sortBy
 	// connector/prefix before budgeting its title.
 	termWidth := detectTerminalWidth()
 
+	// Pick the tree connector style once based on the detected width.
+	// Below compactTreeWidthThreshold the renderer collapses connectors
+	// from 4 cols to 2 cols to preserve title budget on narrow terminals.
+	glyphs := pickGlyphs(termWidth < compactTreeWidthThreshold)
+
 	// Render top-level parents and their children.
 	for _, parent := range topLevel {
-		renderTreeNode(w, parent, childrenOf, contextIDs, sortBy, reverse, "", termWidth)
+		renderTreeNode(w, parent, childrenOf, contextIDs, sortBy, reverse, "", termWidth, glyphs)
 	}
 
 	// Render [Unparented] section if there are unparented issues.
 	if len(unparented) > 0 {
 		fmt.Fprintln(w, ui.RenderMuted("[Unparented]"))
 		for i, issue := range unparented {
-			connector := "├── "
+			connector := glyphs.branch
 			if i == len(unparented)-1 {
-				connector = "└── "
+				connector = glyphs.last
 			}
 			avail := termWidth - visualWidth(connector)
 			fmt.Fprintln(w, connector+FormatIssueLine(issue, avail))
@@ -423,8 +480,10 @@ func Tree(w io.Writer, issues []*model.Issue, contextIDs map[string]bool, sortBy
 // termWidth is the total terminal width. The tree-prefix visual width
 // (for example `├── ` or `│   ├── `) is subtracted from termWidth before
 // passing the remaining budget to FormatIssueLine so nested nodes do not
-// wrap on narrow terminals.
-func renderTreeNode(w io.Writer, issue *model.Issue, childrenOf map[string][]*model.Issue, contextIDs map[string]bool, sortBy string, reverse bool, prefix string, termWidth int) {
+// wrap on narrow terminals. The glyphs parameter selects the connector
+// style (full 4-col or compact 2-col); it is picked once at the top of
+// Tree from the detected terminal width and threaded down unchanged.
+func renderTreeNode(w io.Writer, issue *model.Issue, childrenOf map[string][]*model.Issue, contextIDs map[string]bool, sortBy string, reverse bool, prefix string, termWidth int, glyphs treeGlyphs) {
 	// Render the issue itself. The budget is the full terminal width
 	// minus whatever prefix we are printing in front of the issue line.
 	avail := termWidth - visualWidth(prefix)
@@ -443,11 +502,11 @@ func renderTreeNode(w io.Writer, issue *model.Issue, childrenOf map[string][]*mo
 	store.SortIssues(children, sortBy, reverse)
 
 	for i, child := range children {
-		connector := "├── "
-		childPrefix := prefix + "│   "
+		connector := glyphs.branch
+		childPrefix := prefix + glyphs.contNonLast
 		if i == len(children)-1 {
-			connector = "└── "
-			childPrefix = prefix + "    "
+			connector = glyphs.last
+			childPrefix = prefix + glyphs.contLast
 		}
 
 		childAvail := termWidth - visualWidth(prefix+connector)
@@ -459,7 +518,7 @@ func renderTreeNode(w io.Writer, issue *model.Issue, childrenOf map[string][]*mo
 
 		// Recurse for deeper nesting.
 		if len(childrenOf[child.ID]) > 0 {
-			renderTreeNode_children(w, child.ID, childrenOf, contextIDs, sortBy, reverse, childPrefix, termWidth)
+			renderTreeNode_children(w, child.ID, childrenOf, contextIDs, sortBy, reverse, childPrefix, termWidth, glyphs)
 		}
 	}
 }
@@ -467,16 +526,18 @@ func renderTreeNode(w io.Writer, issue *model.Issue, childrenOf map[string][]*mo
 // renderTreeNode_children renders grandchildren+ at the correct indent level.
 // termWidth is threaded down from the top-level Tree call so each nested
 // line subtracts its own connector/prefix width from the same base budget.
-func renderTreeNode_children(w io.Writer, parentID string, childrenOf map[string][]*model.Issue, contextIDs map[string]bool, sortBy string, reverse bool, prefix string, termWidth int) {
+// glyphs is the connector style selected once at the top of Tree and
+// reused at every depth so the full/compact choice stays consistent.
+func renderTreeNode_children(w io.Writer, parentID string, childrenOf map[string][]*model.Issue, contextIDs map[string]bool, sortBy string, reverse bool, prefix string, termWidth int, glyphs treeGlyphs) {
 	children := childrenOf[parentID]
 	store.SortIssues(children, sortBy, reverse)
 
 	for i, child := range children {
-		connector := "├── "
-		childPrefix := prefix + "│   "
+		connector := glyphs.branch
+		childPrefix := prefix + glyphs.contNonLast
 		if i == len(children)-1 {
-			connector = "└── "
-			childPrefix = prefix + "    "
+			connector = glyphs.last
+			childPrefix = prefix + glyphs.contLast
 		}
 
 		childAvail := termWidth - visualWidth(prefix+connector)
@@ -487,7 +548,7 @@ func renderTreeNode_children(w io.Writer, parentID string, childrenOf map[string
 		fmt.Fprintln(w, prefix+connector+childLine)
 
 		if len(childrenOf[child.ID]) > 0 {
-			renderTreeNode_children(w, child.ID, childrenOf, contextIDs, sortBy, reverse, childPrefix, termWidth)
+			renderTreeNode_children(w, child.ID, childrenOf, contextIDs, sortBy, reverse, childPrefix, termWidth, glyphs)
 		}
 	}
 }
